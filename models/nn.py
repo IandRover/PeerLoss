@@ -12,9 +12,14 @@ class DMILoss:
     def forward(self, output, target):
         outputs = torch.softmax(output, dim=-1)
         targets = target.reshape(-1, 1).type(torch.int64)
-        y_onehot = torch.zeros(target.size(0), 2)
-        y_onehot.scatter_(1, targets, 1)
+        if torch.cuda.is_available():
+            y_onehot = torch.zeros(target.size(0), 2).cuda()
+            y_onehot.scatter_(1, targets.cuda(), 1)
+        else:
+            y_onehot = torch.zeros(target.size(0), 2)
+            y_onehot.scatter_(1, targets, 1)
         y_onehot = y_onehot.transpose(0, 1)
+
         mat = y_onehot @ outputs
         mat = mat / target.size(0)
         det = torch.det(mat.float())
@@ -22,7 +27,6 @@ class DMILoss:
             return torch.log(torch.abs(det) + 0.0001)
         else:
             return -torch.log(torch.abs(det) + 0.0001)
-
 
 class SigmoidLoss:
     def __call__(self, *args, **kwargs):
@@ -71,7 +75,6 @@ class MLP(nn.Module):
         layer.weight.data.mul_(w_scale)
         nn.init.constant_(layer.bias.data, 0)
         return layer
-
 
 class BinaryClassifier(object):
     def __init__(self, model, learning_rate, loss_func='bce'):
@@ -133,6 +136,8 @@ class BinaryClassifier(object):
         if self.ac_fn:
             y_pred = self.ac_fn(y_pred)
         y = torch.tensor(y, dtype=torch.float)
+        if torch.cuda.is_available():
+            y = y.cuda()
 
         loss = self.loss(y_pred, y)
         self.optimizer.zero_grad()
@@ -147,7 +152,7 @@ class BinaryClassifier(object):
         acc = accuracy_score(y, y_pred)
         return acc
 
-    def fit(self, X_train, y_train, X_val=None, y_val=None, episodes=100, batchsize=None, 
+    def fit(self, X_train, y_train, X_val=None, y_val=None, episodes=100, batchsize=None,
             val_interval=20, log_interval=100, logger=None):
         if self.transform_y:
             y_train[y_train == 0] = -1
@@ -163,7 +168,7 @@ class BinaryClassifier(object):
             mb_X_train, mb_y_train = X_train[mb_idxes], y_train[mb_idxes]
             loss = self.train(mb_X_train, mb_y_train)
             losses.append(loss)
-            
+
             if ep % val_interval == 0 and X_val is not None and y_val is not None:
                 train_acc.append(self.val(X_train, y_train))
                 val_acc.append(self.val(X_val, y_val))
@@ -183,7 +188,6 @@ class DMIClassifier(object):
         self.model = model
         if torch.cuda.is_available():
             self.model.cuda()
-
         self.loss = DMILoss()
         self.optimizer = torch.optim.Adam(self.model.parameters(), learning_rate)
 
@@ -198,7 +202,6 @@ class DMIClassifier(object):
 
         y_pred = self.model(X)
         y = torch.tensor(y, dtype=torch.float)
-
         loss = self.loss(y_pred, y)
         self.optimizer.zero_grad()
         loss.backward()
@@ -246,15 +249,11 @@ class SurrogateBinaryClassifier(BinaryClassifier):
 
     def train(self, X, y):
         """ The original surrogate function is:
-
                (1 - \rho_{-y}) * l(t,y) - \rho_{y} * l(t,-y)
         loss = ---------------------------------------------
                         1 - \rho_{+1} - \rho_{-1}
-
         where y \in {-1, +1},
-
         But because we use {0, 1} as the label, so the loss becomes:
-
                (1 - e_{1-y}) * l(t,y) - e_{y} * l(t,1-y)
         loss = -----------------------------------------
                            1 - e_0 - e_1
@@ -271,6 +270,10 @@ class SurrogateBinaryClassifier(BinaryClassifier):
         if self.transform_y:
             y[y == 0] = -1
         y = torch.tensor(y, dtype=torch.float)
+        if torch.cuda.is_available():
+            y = y.cuda()
+            c1 = c1.cuda()
+            c2 = c2.cuda()
 
         loss1 = c1 * self.loss(y_pred, y)
         loss2 = c2 * self.loss(y_pred, -y if self.transform_y else 1 - y)
@@ -294,11 +297,13 @@ class PeerBinaryClassifier(BinaryClassifier):
         if self.ac_fn:
             y_pred = self.ac_fn(y_pred)
         y = torch.tensor(y, dtype=torch.float)
-
         y_pred_ = self.model(X_)
         if self.ac_fn:
             y_pred_ = self.ac_fn(y_pred_)
         y_ = torch.tensor(y_, dtype=torch.float)
+        if torch.cuda.is_available():
+            y = y.cuda()
+            y_ = y_.cuda()
 
         loss = self.loss(y_pred, y) - self.alpha * self.loss(y_pred_, y_)
         self.optimizer.zero_grad()
@@ -326,7 +331,7 @@ class PeerBinaryClassifier(BinaryClassifier):
             mb_y_train_ = y_train[np.random.choice(m, batchsize_, replace=False)]
             loss = self.train(mb_X_train, mb_y_train, mb_X_train_, mb_y_train_)
             losses.append(loss)
-            
+
             if ep % val_interval == 0 and X_val is not None and y_val is not None:
                 train_acc.append(self.val(X_train, y_train))
                 val_acc.append(self.val(X_val, y_val))
